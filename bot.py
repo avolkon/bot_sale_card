@@ -1,18 +1,14 @@
-@'
 import os
-import re
 import tempfile
-from typing import Dict, Any, List, Tuple
+from typing import List, Tuple
 
 import aiohttp
-import requests
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
-from aiogram.utils.markdown import hbold
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,9 +16,6 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-USE_OPENROUTER = os.getenv("USE_OPENROUTER", "False").lower() == "true"
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не найден в .env файле!")
@@ -61,9 +54,6 @@ CARD_TEMPLATE = """
 - инструмент 1  
 - инструмент 2  
 
-**[Задача 2]**  
-- ...
-
 ---
 
 С нами комфортно работать!  
@@ -93,13 +83,13 @@ def parse_into_blocks(html: str) -> List[Tuple[str, List[str]]]:
     current_title = "Общее описание"
     current_texts = []
     
-    for element in soup.find_all(['h1', 'h2', 'h3', 'p', 'ul', 'ol', 'div']):
+    for element in soup.find_all(['h1', 'h2', 'h3', 'p', 'ul', 'ol']):
         if element.name in ['h1', 'h2', 'h3']:
             if current_texts:
                 blocks.append((current_title, current_texts))
                 current_texts = []
             current_title = element.get_text(strip=True)
-        elif element.name in ['p', 'div']:
+        elif element.name == 'p':
             text = element.get_text(strip=True)
             if len(text) > 20:
                 current_texts.append(text)
@@ -118,32 +108,22 @@ def save_text_to_txt(content: str) -> str:
         f.write(content)
     return path
 
-async def call_llm(prompt: str, system_prompt: str = "Ты помощник маркетолога.") -> str:
-    if USE_OPENROUTER:
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        url = OPENROUTER_URL
-    else:
-        headers = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        url = DEEPSEEK_API_URL
-    
+async def call_llm(prompt: str) -> str:
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json"
+    }
     payload = {
-        "model": "deepseek-chat" if not USE_OPENROUTER else "deepseek/deepseek-chat",
+        "model": "deepseek-chat",
         "messages": [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": "Ты эксперт по B2B-маркетингу."},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.5,
         "max_tokens": 2000
     }
-    
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, headers=headers) as resp:
+        async with session.post(DEEPSEEK_API_URL, json=payload, headers=headers) as resp:
             data = await resp.json()
             return data["choices"][0]["message"]["content"]
 
@@ -152,47 +132,18 @@ async def generate_card_from_text(parsed_blocks: List[Tuple[str, List[str]]]) ->
     for title, texts in parsed_blocks:
         raw_text += f"\n=== {title} ===\n" + "\n".join(texts) + "\n"
     
-    save_text_to_txt(raw_text)
-    
-    prompt1 = f"""
+    prompt = f"""
     Используя шаблон, создай карточку продукта на основе текста.
-    
+
     ШАБЛОН:
     {CARD_TEMPLATE}
-    
-    ТЕКСТ:
-    {raw_text}
-    
-    Заполни все блоки. Если данных нет, напиши Информация отсутствует.
-    """
-    
-    draft = await call_llm(prompt1, system_prompt="Ты эксперт по B2B-маркетингу.")
-    
-    prompt2 = f"""
-    Улучши черновик карточки: удали воду, усиль выгоды, выдели ключевое *жирным*.
-    
-    ЧЕРНОВИК:
-    {draft}
-    
-    Напиши только финальную версию.
-    """
-    
-    final_card = await call_llm(prompt2, system_prompt="Ты профессиональный маркетолог.")
-    return final_card
 
-async def edit_card_by_user(original_card: str, user_edit_text: str) -> str:
-    prompt = f"""
-    Пользователь отредактировал карточку. Верни исправленный вариант.
-    
-    ОРИГИНАЛ:
-    {original_card}
-    
-    ТЕКСТ ПОЛЬЗОВАТЕЛЯ:
-    {user_edit_text}
-    
-    Верни этот текст как финальную карточку.
+    ТЕКСТ О ПРОДУКТЕ:
+    {raw_text}
+
+    Заполни все блоки. Если данных нет, напиши "Информация отсутствует".
     """
-    return await call_llm(prompt, system_prompt="Ты помощник, применяющий правки.")
+    return await call_llm(prompt)
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -202,10 +153,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
             [InlineKeyboardButton(text="📦 Создать карточку продукта", callback_data="create_card")]
         ]
     )
-    await message.answer(
-        "Привет! Я помогу создать продающую карточку продукта.\nНажми на кнопку, чтобы начать.",
-        reply_markup=keyboard
-    )
+    await message.answer("Привет! Нажми на кнопку, чтобы начать.", reply_markup=keyboard)
 
 @dp.callback_query(F.data == "create_card")
 async def ask_url(callback: types.CallbackQuery, state: FSMContext):
@@ -217,7 +165,7 @@ async def ask_url(callback: types.CallbackQuery, state: FSMContext):
 async def process_url(message: types.Message, state: FSMContext):
     url = message.text.strip()
     if not url.startswith("http"):
-        await message.answer("❌ Введите корректный URL (http:// или https://)")
+        await message.answer("❌ Введите корректный URL")
         return
     
     processing_msg = await message.answer("🔍 Парсинг страницы...")
@@ -226,12 +174,12 @@ async def process_url(message: types.Message, state: FSMContext):
         html = await fetch_html(url)
         blocks = parse_into_blocks(html)
         if not blocks:
-            await processing_msg.edit_text("Не удалось извлечь текст. Попробуйте другой URL.")
+            await processing_msg.edit_text("Не удалось извлечь текст.")
             return
         
-        await processing_msg.edit_text("🧠 Генерация карточки через ИИ (1-2 минуты)...")
+        await processing_msg.edit_text("🧠 Генерация карточки (1-2 минуты)...")
         card_text = await generate_card_from_text(blocks)
-        await state.update_data(generated_card=card_text, original_url=url)
+        await state.update_data(generated_card=card_text)
         
         if len(card_text) > 4000:
             card_text = card_text[:4000] + "\n\n...(текст обрезан)"
@@ -244,10 +192,7 @@ async def process_url(message: types.Message, state: FSMContext):
         )
         
         await processing_msg.delete()
-        await message.answer(
-            f"✨ Карточка продукта:\n\n{card_text}\n\nВсё устраивает?",
-            reply_markup=keyboard
-        )
+        await message.answer(f"✨ Карточка:\n\n{card_text}\n\nВсё устраивает?", reply_markup=keyboard)
         await state.set_state(ProductCardState.card_review)
         
     except Exception as e:
@@ -272,15 +217,16 @@ async def request_edit(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.message(ProductCardState.waiting_for_edit)
 async def apply_edit(message: types.Message, state: FSMContext):
-    user_edited_text = message.text
+    user_text = message.text
     data = await state.get_data()
-    original_card = data["generated_card"]
+    original = data["generated_card"]
     
     await message.answer("🔄 Применяю правки...")
     
     try:
-        final_card = await edit_card_by_user(original_card, user_edited_text)
-        await state.update_data(generated_card=final_card)
+        prompt = f"Верни исправленный вариант карточки. Оригинал: {original}. Текст пользователя: {user_text}"
+        final = await call_llm(prompt)
+        await state.update_data(generated_card=final)
         
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
@@ -288,10 +234,7 @@ async def apply_edit(message: types.Message, state: FSMContext):
                 [InlineKeyboardButton(text="✏️ Снова править", callback_data="edit_card")]
             ]
         )
-        await message.answer(
-            f"✨ Исправленная карточка:\n\n{final_card}\n\nТеперь всё подходит?",
-            reply_markup=keyboard
-        )
+        await message.answer(f"✨ Исправленная карточка:\n\n{final}\n\nТеперь всё подходит?", reply_markup=keyboard)
         await state.set_state(ProductCardState.card_review)
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
@@ -303,5 +246,4 @@ async def main():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(main())
-'@ | Out-File -FilePath "bot.py" -Encoding utf8
 
