@@ -86,3 +86,47 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
+async def fetch_html(url: str) -> str:
+    """Асинхронно получить HTML страницы"""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=15) as resp:
+            return await resp.text()
+
+def parse_into_blocks(html: str) -> List[Tuple[str, List[str]]]:
+    """Парсит HTML и группирует текст по блокам"""
+    soup = BeautifulSoup(html, 'html.parser')
+    for script in soup(["script", "style", "nav", "footer", "header"]):
+        script.decompose()
+    
+    blocks = []
+    current_title = "Общее описание"
+    current_texts = []
+    
+    for element in soup.find_all(['h1', 'h2', 'h3', 'p', 'ul', 'ol', 'div']):
+        if element.name in ['h1', 'h2', 'h3']:
+            if current_texts:
+                blocks.append((current_title, current_texts))
+                current_texts = []
+            current_title = element.get_text(strip=True)
+        elif element.name in ['p', 'div']:
+            text = element.get_text(strip=True)
+            if len(text) > 20:
+                current_texts.append(text)
+        elif element.name in ['ul', 'ol']:
+            items = [li.get_text(strip=True) for li in element.find_all('li')]
+            current_texts.extend(items)
+    
+    if current_texts:
+        blocks.append((current_title, current_texts))
+    
+    return blocks if blocks else [("Общий текст", [soup.get_text(separator="\n", strip=True)])]
+
+def save_text_to_txt(content: str) -> str:
+    """Сохраняет текст во временный файл и возвращает путь"""
+    fd, path = tempfile.mkstemp(suffix=".txt", text=True)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        f.write(content)
+    return path
+
+
